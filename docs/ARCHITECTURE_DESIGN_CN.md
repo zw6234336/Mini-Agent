@@ -152,25 +152,108 @@ graph TD
 
 ---
 
-## 5. 生产环境能力评估 (Production Readiness Assessment)
+## 5. 核心微流程详解 (Detailed Micro-Processes)
 
-### 5.1 并发模型与性能 (Concurrency & Performance)
+为了更直观地理解 Agent 内部的独立运行机制，以下展示了关键子系统的微流程图。
+
+### 5.1 意图识别与任务拆解 (Intent Recognition & Routing)
+
+Agent 如何从用户的自然语言中识别意图并路由到具体工具：
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant AgentCore
+    participant LLM
+    participant ToolRegistry (MCP/Local)
+
+    User->>AgentCore: 发送指令 (e.g. "查询张三的保单")
+    AgentCore->>ToolRegistry: 获取所有可用工具定义 (JSON Schema)
+    AgentCore->>LLM: 构造 Prompt (Instruction + Tool Definitions + User Query)
+    
+    LLM-->>LLM: 内部推理 (Intent Recognition)
+    note right of LLM: 1. 意图: 查询保单<br/>2. 匹配工具: get_policy_detail<br/>3. 提取参数: name="张三"
+    
+    LLM->>AgentCore: 返回 tool_calls=[get_policy_detail(name="张三")]
+    AgentCore->>ToolRegistry: 查找并执行该工具实现
+```
+
+### 5.2 记忆管理机制 (Memory Management)
+
+区分短期工作记忆 (Context Window) 与长期外部记忆 (NoteTool) 的流转：
+
+```mermaid
+graph TB
+    subgraph "Short-Term Memory (Context Window)"
+        History[Message History List]
+        TokenLimit{"Token Limit Reached?"}
+        Summarizer[LLM Summarizer]
+        Compressed[Summary Text]
+        
+        History --> TokenLimit
+        TokenLimit -- Yes --> Summarizer
+        Summarizer --> Compressed
+        Compressed -.->|Replace Old Msgs| History
+    end
+
+    subgraph "Long-Term Memory (NoteTool)"
+        NoteFile["Persistent Note File (.md)"]
+        ReadTool[read_note]
+        WriteTool[write_note]
+    end
+
+    AgentDecision[Agent Core Decision]
+    
+    AgentDecision -->|Observation found valuable info| WriteTool
+    WriteTool -->|Append/Update| NoteFile
+    
+    AgentDecision -->|Need background info| ReadTool
+    NoteFile -->|Return Content| ReadTool
+    ReadTool -->|Inject to View| History
+```
+
+### 5.3 任务观察与反思循环 (Task Observation Loop)
+
+ReAct (Reasoning + Acting) 范式中的观察与自我纠错微流程：
+
+```mermaid
+flowchart TD
+    Start([开始子任务]) --> Thought[思考: 规划下一步行动]
+    Thought --> Action[执行工具: Action]
+    Action --> Output{观察: 工具输出结果}
+    
+    Output -- 成功 --> Analyzer[分析: 结果是否符合预期?]
+    Output -- 失败/报错 --> ErrorHandler[反思: 分析错误原因]
+    
+    Analyzer -- 符合预期 --> Reflection[总结: 记录该步骤结论]
+    Reflection --> NextStep([进入下一个子任务])
+    
+    Analyzer -- 结果为空/异常 --> Refine[修正: 调整参数或尝试替代方案]
+    ErrorHandler --> Refine
+    Refine --> Thought
+```
+
+---
+
+## 6. 生产环境能力评估 (Production Readiness Assessment)
+
+### 6.1 并发模型与性能 (Concurrency & Performance)
 本框架基于 Python `asyncio` 构建，这为高并发 I/O 密集型任务提供了坚实基础：
 -   **异步 I/O (Async I/O)**: 核心循环及工具执行均支持 `await`，在调用 LLM API 或等待外部 MCP 工具响应时即使挂起也不会阻塞线程，允许单实例处理高频的网络交互。
 -   **任务队列**: 当前设计为单 Agent 单任务流。若需处理多用户请求，建议在上层使用 Celery 或 FastAPI 的 BackgroundTasks 进行任务分发。
 -   **性能瓶颈**: 由于 Python GIL (Global Interpreter Lock) 的存在，若是纯计算密集型任务（如本地大模型推理或复杂数据处理），建议通过 subprocess 或将其拆分为独立微服务调用。
 
-### 5.2 部署架构 (Deployment Architecture)
+### 6.2 部署架构 (Deployment Architecture)
 Mini-Agent 设计为无状态 (Stateless) 或弱状态 (Soft-state)，极易于容器化部署：
 -   **Docker 支持**: 推荐使用轻量级基础镜像 (e.g., `python:3.11-slim`)，结合 `uv` 进行快速依赖安装。
 -   **资源隔离**: 生产环境必须配置 Docker/K8s 的资源限制 (`resources.limits`)，尤其是内存限制，防止长上下文处理导致 OOM。
 -   **安全沙箱**: Agent 具有文件读写和 Bash 执行能力，**严禁使用 root 权限运行**。建议配置非特权用户 (`useradd -r agent`) 并限制工作目录 (`workspace`) 的读写权限。
 
-### 5.3 可观测性 (Observability)
+### 6.3 可观测性 (Observability)
 -   **结构化日志**: `AgentLogger` 提供了详细的执行链路日志，包含思考过程、工具参数及执行结果。可直接对接 ELK 或 Loki 等日志收集系统。
 -   **Token 监控**: 内置 Token 计数器，应当对接 Prometheus 或 Datadog 监控大模型成本。
 -   **审计追踪**: 所有的 Bash 操作和关键文件修改均有日志记录，在生产环境中应开启更高两级的审计日志以满足合规要求。
 
-### 5.4 扩展性与高可用 (Scalability & HA)
+### 6.4 扩展性与高可用 (Scalability & HA)
 -   **水平扩展**: 由于会话状态可序列化，通过引入 Redis/PostgreSQL 存储会话历史，可以轻松实现 Agent Server 的水平扩展 (load balancing)。
 -   **模型熔断**: 生产环境建议在上层封装模型网关 (Model Gateway)，配置多模型轮询或故障转移 (Failover)，避免单一 LLM 提供商宕机导致服务不可用。

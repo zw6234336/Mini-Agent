@@ -107,24 +107,57 @@ graph LR
 
 ---
 
-## 4. 数据安全与鉴权 (Security & Auth)
+## 4. MCP 工具 vs 技能 (MCP Tools vs Skills)
+
+在实现过程中，一个常见的问题是：**“每一个 MCP 接口调用都需要包装成 Skill 吗？”** 答案是否定的。必须区分 **原子能力 (Atomic Capability)** 与 **复合流程 (Composite Workflow)**。
+
+### 4.1 决策矩阵 (Decision Matrix)
+
+| 场景特点 | 推荐方式 | 解释 |
+| :--- | :--- | :--- |
+| **单一查询/操作** | **直接调用 MCP** | 例如“查询保单详情”。这是一个原子操作，LLM 可以直接理解并调用 `get_policy_detail`。 |
+| **复杂业务流程 (SOP)** | **封装为 Skill** | 例如“为客户制定家庭保障计划”。这涉及查询已有保单、分析缺口、生成建议书等多个步骤。 |
+| **需严格遵守规范** | **封装为 Skill** | 例如“处理理赔审核”，必须按顺序检查 A、B、C 三个条件，不能跳过。 |
+| **跨系统联动** | **封装为 Skill** | 例如“客户迁居”，需要同时更新 CRM 地址和保单邮寄地址。 |
+
+### 4.2 示例对比
+
+#### 场景 A: 简单查询 (直接使用 MCP)
+*   **用户**: "查一下张三今年的业绩。"
+*   **Agent**: 识别意图 -> 直接调用 `insurance.performance.get_my_kpi(name="张三")` -> 返回结果。
+*   **结论**: 无需 Skill，LLM 足够智能来处理。
+
+#### 场景 B: 复杂业务 (使用 Skill)
+*   **用户**: "帮我对张三进行一次年度保单检视。"
+*   **Agent**: 识别意图 -> 调用 `skills/annual_policy_review`。
+*   **Skill 内部逻辑 (SKILL.md)**:
+    1.  调用 `insurance.crm.search_customer` 获取 ID。
+    2.  调用 `insurance.policy.list_customer_policies` 获取所有保单。
+    3.  调用 `insurance.crm.get_customer_persona` 获取家庭结构。
+    4.  让 LLM 对比保单覆盖范围与家庭需求。
+    5.  生成检视报告并发送邮件。
+*   **结论**: 必须封装为 Skill，否则 Agent 容易在多步推理中迷失或遗漏步骤。
+
+---
+
+## 5. 数据安全与鉴权 (Security & Auth)
 
 Agent 调用后端接口时，必须确保数据安全和权限合规。
 
-### 4.1 鉴权透传方案
+### 5.1 鉴权透传方案
 Agent 本身作为“代理人助手”，继承当前操作用户的身份。
 
 1.  **Environment Variables**: 在启动 MCP Server 时，注入系统级服务账号（如 `CRM_API_TOKEN`）。
 2.  **Request Context**: (高级) 如果 Agent 支持多用户，需在 MCP 请求头中携带用户的 `Auth-Token`，MCP Server 解析 Token 并以该用户身份调用后端接口。
 
-### 4.2 数据脱敏
+### 5.2 数据脱敏
 **原则**: MCP Server 必须在返回数据给 Agent 之前进行脱敏处理。
 *   **身份证/手机号**: 自动掩码处理 (e.g., `138****0000`).
 *   **敏感字段**: 过滤掉非业务必要的底层字段（如数据库主键、内部版本号）。
 
 ---
 
-## 5. 实施路线图
+## 6. 实施路线图
 
 ### 第一阶段：搭建 MCP Server 骨架
 推荐使用 `python-mcp` 或 `mcp-node-sdk` 搭建独立服务。
